@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.9"
+# dependencies = ["cryptography>=3.0"]
+# ///
 """Build and inspect `update.PGL` payloads for Xploder Parental GameLock (PS2).
 
-Parental GameLock's firmware-update channel is an unsigned ELF loader. The resident
-program reads `update.PGL`, decrypts it with AES-128-ECB, and if the plaintext starts
-with `\\x7fELF` it loads the program headers and jumps to the entry point via `ExecPS2`.
+The GameLock update channel is a loader that checks no signature. The program on the
+memory card reads `update.PGL` and decrypts it with AES-128-ECB. If the result starts
+with `\\x7fELF`, the loader reads the program headers and jumps to the entry point with
+`ExecPS2`.
 
-The AES key is the MD5 of the installation's own password — the same 16 bytes stored at
-offset 0x10 of `Config.PGL` on the memory card. There is no signature on the payload, so
-knowing the password is sufficient to run arbitrary code.
+The AES key is the MD5 hash of the GameLock password. GameLock stores the same 16 bytes
+at offset 0x10 of `Config.PGL` on the memory card. Nothing signs the payload, so the
+password alone is enough to run any program.
 
-See README.md for the reverse-engineering details.
+README.md describes the format.
 """
 
 from __future__ import annotations
@@ -23,31 +28,30 @@ from pathlib import Path
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
-# --- device-imposed limits ------------------------------------------------------------
-# The on-screen keyboard buffer is 16 bytes, with a NUL written at index 16, and entries
-# shorter than 5 characters are rejected with "Password too short".
+# --- limits that the device imposes ---------------------------------------------------
+# The keyboard buffer holds 16 bytes. GameLock rejects entries shorter than 5 characters
+# with the message "Password too short".
+
 PASSWORD_MIN = 5
 PASSWORD_MAX = 16
 
-# The loader refuses sizes of 0 or > 0x500000 before allocating.
+# The loader rejects a size of 0, and any size over 0x500000.
 MAX_PAYLOAD = 0x500000
 BLOCK = 16
 
-# --- resident memory map (unpacked BOOT.ELF, loaded at 0x100000) ----------------------
+# --- memory map of the GameLock program (BOOT.ELF, decompressed, loaded at 0x100000) --
 RESIDENT_BASE = 0x100000
-RESIDENT_IMAGE_END = 0x15EA0C  # code + data of the unpacked resident
-RESIDENT_BSS_END = 0x272AE8  # cleared by the resident's own startup
-LOADER_ADDR = 0x1193F8  # FUN_001193f8, the ELF loader itself
+RESIDENT_IMAGE_END = 0x15EA0C  # end of its code and data
+RESIDENT_BSS_END = 0x272AE8  # end of the memory its startup code clears
+LOADER_ADDR = 0x1193F8  # the ELF loader itself
 
-# The loader copies PT_LOAD segments while executing, so anything it still needs after the
-# copy must survive it: the loader, the memcpy/memset helpers, the IOP teardown calls,
-# FlushCache (0x121EB0) and _ExecPS2 (0x121E00). Overlapping *this* window is fatal.
+# The loader copies PT_LOAD segments while it runs. Everything it still needs after the
+# copy must survive: the loader, the memory-copy helpers, the IOP shutdown calls,
+# FlushCache (0x121EB0) and _ExecPS2 (0x121E00). An overlap with this window is fatal.
 #
-# Overlapping the rest of the resident is not. Demonstrated: loading GameLock's own
-# unpacked resident (a full 0x100000-0x35EA0C segment) over the running patched copy
-# replaced live code mid-run — including the patched device-enumeration stub at
-# 0x100C50 — and still reached ExecPS2 and booted the payload. Only a narrow window
-# genuinely matters.
+# An overlap with the rest of the program is not fatal. A test loaded the GameLock program
+# itself, a full 0x100000-0x35EA0C segment, over the running copy. It replaced live code,
+# including the stub at 0x100C50, and still reached ExecPS2 and booted.
 CRITICAL_START = 0x119000
 CRITICAL_END = 0x124000
 
@@ -55,16 +59,16 @@ PT_LOAD = 1
 
 
 class GameLockError(Exception):
-    """Raised for malformed input or a payload the device would reject."""
+    """Raised for bad input, or for a payload that the device rejects."""
 
 
 # --- crypto ---------------------------------------------------------------------------
 
 def derive_key(password: str) -> bytes:
-    """Return the AES-128 key for `password`: the raw MD5 of its ASCII bytes.
+    """Return the AES-128 key for `password`, which is the MD5 hash of its ASCII bytes.
 
-    This is byte-identical to the digest the device stores at Config.PGL+0x10 and
-    compares against with memcmp when you type the password in.
+    GameLock stores the same 16 bytes at Config.PGL+0x10. It compares them with memcmp
+    when you type the password.
     """
     validate_password(password)
     return hashlib.md5(password.encode("ascii")).digest()
@@ -74,7 +78,7 @@ def validate_password(password: str) -> None:
     try:
         raw = password.encode("ascii")
     except UnicodeEncodeError as exc:
-        raise GameLockError("password must be ASCII; the on-screen keyboard cannot type anything else") from exc
+        raise GameLockError("password must be ASCII. The on-screen keyboard cannot type anything else.") from exc
     if not (PASSWORD_MIN <= len(raw) <= PASSWORD_MAX):
         raise GameLockError(
             f"password must be {PASSWORD_MIN}-{PASSWORD_MAX} characters (got {len(raw)})"
@@ -89,11 +93,11 @@ def _cipher(key: bytes) -> Cipher:
 
 
 def encrypt(plaintext: bytes, key: bytes) -> bytes:
-    """AES-128-ECB encrypt, zero-padded up to a block boundary.
+    """Encrypt with AES-128-ECB, padded with zeros to a block boundary.
 
-    Padding matters: the loader rounds the file size up to 16 and decrypts that many
-    bytes, but only reads the real file length off the card. A short final block would
-    decrypt uninitialised heap.
+    The loader rounds the file size up to 16 bytes and decrypts that many bytes. It reads
+    only the real file length from the card. A short final block therefore decrypts
+    uninitialized memory.
     """
     padded = plaintext + b"\0" * (-len(plaintext) % BLOCK)
     return _cipher(key).encryptor().update(padded)
@@ -131,11 +135,11 @@ class ElfInfo:
 
 
 def parse_elf(data: bytes) -> ElfInfo:
-    """Parse just enough ELF32-LE to validate a PS2 payload."""
+    """Read the parts of an ELF32 little-endian header that a PS2 payload needs."""
     if len(data) < 52 or data[:4] != b"\x7fELF":
         raise GameLockError("not an ELF file (bad magic)")
     if data[4] != 1:
-        raise GameLockError("not ELF32 — the PS2 EE loader only handles 32-bit")
+        raise GameLockError("not ELF32. The PS2 loader handles 32-bit files only.")
     if data[5] != 1:
         raise GameLockError("not little-endian")
     e_machine, = struct.unpack_from("<H", data, 18)
@@ -160,10 +164,7 @@ def _overlaps(a0: int, a1: int, b0: int, b1: int) -> bool:
 
 
 def check_payload(data: bytes) -> list[tuple[str, str]]:
-    """Return [(level, message)] where level is 'error' or 'warning'.
-
-    These are the conditions that actually bite in practice, each learned the hard way.
-    """
+    """Return a list of (level, message), where level is 'error' or 'warning'."""
     out: list[tuple[str, str]] = []
     info = parse_elf(data)
 
@@ -171,15 +172,15 @@ def check_payload(data: bytes) -> list[tuple[str, str]]:
     if padded == 0:
         out.append(("error", "payload is empty"))
     if padded > MAX_PAYLOAD:
-        out.append(("error", f"payload is {padded:#x} bytes; loader rejects anything over {MAX_PAYLOAD:#x}"))
+        out.append(("error", f"payload is {padded:#x} bytes. The loader rejects anything over {MAX_PAYLOAD:#x}."))
 
     loads = info.loads
     if not loads:
-        out.append(("error", "no PT_LOAD segments — nothing would be copied"))
+        out.append(("error", "no PT_LOAD segments, so the loader copies nothing"))
         return out
 
-    # The single most common self-inflicted failure: an entry point that is not inside
-    # any loaded, file-backed range. Execution starts on whatever happens to be there.
+    # An entry point outside every loaded, file-backed range is the most common mistake.
+    # The console then starts running whatever sits at that address.
     if not any(s.vaddr <= info.entry < s.vaddr + s.filesz for s in loads):
         out.append((
             "error",
@@ -192,15 +193,15 @@ def check_payload(data: bytes) -> list[tuple[str, str]]:
             out.append((
                 "error",
                 f"segment [{s.vaddr:#x},{s.end:#x}) overlaps [{CRITICAL_START:#x},"
-                f"{CRITICAL_END:#x}), which holds the loader, its memcpy/memset helpers "
-                "and ExecPS2; overwriting those mid-copy is fatal",
+                f"{CRITICAL_END:#x}). That range holds the loader, its memory-copy "
+                "helpers and ExecPS2. The copy destroys the code that performs it.",
             ))
         elif _overlaps(s.vaddr, s.end, RESIDENT_BASE, RESIDENT_BSS_END):
             out.append((
                 "warning",
-                f"segment [{s.vaddr:#x},{s.end:#x}) overlaps the resident "
-                f"[{RESIDENT_BASE:#x},{RESIDENT_BSS_END:#x}) outside the critical window; "
-                "observed to work, but you are overwriting a running program",
+                f"segment [{s.vaddr:#x},{s.end:#x}) overlaps the GameLock program "
+                f"[{RESIDENT_BASE:#x},{RESIDENT_BSS_END:#x}) outside the critical window. "
+                "This works in testing, but it overwrites a running program.",
             ))
     return out
 

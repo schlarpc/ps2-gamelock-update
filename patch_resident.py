@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
-"""Patch the Parental GameLock resident to read `update.PGL` from the memory card.
+# /// script
+# requires-python = ">=3.9"
+# dependencies = []
+# ///
+"""Patch the GameLock program to read `update.PGL` from the memory card.
 
-The stock loader looks for `update.PGL` on USB mass storage, enumerated through
-GameLock's own `FCD USB-OHCI` driver. PCSX2 does not emulate that, so the update path is
-unreachable under emulation. This redirects the *source* of the file to `mc0:` and
-nothing else — the AES decrypt, the ELF parsing, the segment copy and the `ExecPS2`
-handover are all untouched vendor code.
+The stock loader looks for `update.PGL` on USB mass storage. It finds the device through
+the `FCD USB-OHCI` driver of GameLock, which PCSX2 does not emulate. This script changes
+where the file comes from, to `mc0:`, and changes nothing else. The AES decrypt, the ELF
+parsing, the segment copy and the `ExecPS2` call all stay as the original vendor code.
 
-Input is the **unpacked** resident (ps2-packer decompressed, based at 0x100000), not the
-packed `BOOT.ELF` from the memory card. Output is a bootable ELF you can hand straight to
-`pcsx2 -elf`.
+The input is the decompressed program, based at 0x100000, not the compressed `BOOT.ELF`
+from the memory card. The output is an ELF that you can pass to `pcsx2 -elf`.
 """
 
 from __future__ import annotations
@@ -21,21 +23,21 @@ from pathlib import Path
 
 BASE = 0x100000
 
-# sprintf format used to build the update path: "%s:\%s" with (device, "update.PGL").
-# mc0 wants forward slashes, and the replacement is the same length, so this is one byte.
+# The sprintf format that builds the update path: "%s:\%s" with (device, "update.PGL").
+# mc0 needs forward slashes. The replacement is the same length, so one byte changes.
 FMT_ADDR = 0x126858
 FMT_OLD = b"%s:\\%s"
 FMT_NEW = b"%s:/%s"
 
-# Initial screen index. 0 = game_details, 7 = auto_update, which is the screen whose
-# per-frame handler runs the update state machine. Purely a convenience so the update
-# path runs at boot instead of requiring menu navigation.
+# The screen that GameLock starts on. 0 is game_details. 7 is auto_update, the screen
+# that runs the update code every frame. This change is a convenience, so that the update
+# runs at startup and you do not navigate the menu.
 SCREEN_ADDR = 0x12D10C
 SCREEN_AUTO_UPDATE = 7
 
-# FUN_00100c50(a0=&count, a1=namebuf, a2=max) normally issues a "UFS9999" devctl to
-# enumerate USB mass storage. Replace it with a stub reporting exactly one device, "mc0",
-# so the existing path-building code produces "mc0:/update.PGL".
+# FUN_00100c50(a0=&count, a1=namebuf, a2=max) normally sends a "UFS9999" devctl to list
+# USB mass storage devices. This stub reports one device instead, named "mc0", so that
+# the original path code builds "mc0:/update.PGL".
 ENUM_ADDR = 0x100C50
 ENUM_STUB = [
     0x3C020030,  # lui v0, 0x0030
@@ -60,7 +62,7 @@ def patch(image: bytes, *, auto_update: bool = True) -> bytes:
     if buf[off:off + len(FMT_OLD)] != FMT_OLD:
         raise SystemExit(
             f"unexpected bytes at {FMT_ADDR:#x}: {bytes(buf[off:off + len(FMT_OLD)])!r} "
-            f"(expected {FMT_OLD!r}) — is this the unpacked resident, based at {BASE:#x}?"
+            f"(expected {FMT_OLD!r}). Is this the decompressed program, based at {BASE:#x}?"
         )
     buf[off:off + len(FMT_NEW)] = FMT_NEW
 
@@ -77,7 +79,7 @@ def patch(image: bytes, *, auto_update: bool = True) -> bytes:
 
 
 def wrap_elf(body: bytes, base: int = BASE, entry: int = ENTRY, bss: int = 0x200000) -> bytes:
-    """Wrap a raw memory image in a minimal ELF32-LE MIPS executable."""
+    """Wrap a raw memory image in a small ELF32 little-endian MIPS executable."""
     eh = (
         b"\x7fELF"
         + bytes([1, 1, 1, 0])
@@ -90,21 +92,21 @@ def wrap_elf(body: bytes, base: int = BASE, entry: int = ENTRY, bss: int = 0x200
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("resident", help="unpacked resident image (raw, based at 0x100000)")
-    ap.add_argument("output", help="patched bootable ELF")
+    ap.add_argument("program", help="decompressed GameLock program, raw, based at 0x100000")
+    ap.add_argument("output", help="the patched ELF to write")
     ap.add_argument(
         "--no-auto-update",
         action="store_true",
-        help="keep the normal start screen; navigate to Update yourself",
+        help="keep the normal start screen. Navigate to the Update screen yourself.",
     )
     ap.add_argument("--raw", action="store_true", help="write a raw image instead of an ELF")
     args = ap.parse_args(argv)
 
-    image = Path(args.resident).read_bytes()
+    image = Path(args.program).read_bytes()
     patched = patch(image, auto_update=not args.no_auto_update)
     out = Path(args.output)
     out.write_bytes(patched if args.raw else wrap_elf(patched))
-    print(f"{args.resident} -> {out} ({out.stat().st_size} bytes)")
+    print(f"{args.program} -> {out} ({out.stat().st_size} bytes)")
     print("place update.PGL in the memory card root, then: pcsx2 -elf", out)
     return 0
 

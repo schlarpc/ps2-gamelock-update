@@ -80,7 +80,7 @@ def test_rejects_entry_outside_load():
 
 def test_rejects_overlap_with_the_critical_window():
     problems = errors(make_elf(entry=g.LOADER_ADDR, vaddr=g.LOADER_ADDR))
-    assert any("fatal" in m for m in problems)
+    assert any("destroys the code" in m for m in problems)
 
 
 def test_resident_overlap_outside_critical_window_is_only_a_warning():
