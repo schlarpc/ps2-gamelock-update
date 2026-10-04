@@ -57,14 +57,28 @@ trigger the update from GameLock's menu.
 - **Entry point** must lie inside a file-backed `PT_LOAD` range. Getting this wrong is the
   easiest way to waste an afternoon: the loader faithfully jumps to whatever you declared,
   and you get a black screen with a TLB miss at your own entry address.
-- **Load address** must avoid the resident's own memory. The loader copies segments *while
-  it is executing*, so a payload overlapping `0x100000`–`0x15EA0C` overwrites the code doing
-  the copying. Overlapping the bss up to `0x272AE8` is usually survivable but not safe.
-  Link high — uLaunchELF sits at `0x01CB8190` and works unmodified.
+- **Load address** must avoid `0x119000`–`0x124000`. The loader copies segments *while it is
+  executing*, so the loader itself, its memcpy/memset helpers, `FlushCache` and `ExecPS2`
+  all have to survive the copy. Overlapping that window is fatal; overlapping the rest of
+  the resident is only a warning, and is demonstrably survivable — see below.
+
+  In practice this almost never bites, because released PS2 homebrew ships ps2-packer'd and
+  therefore links high (OPL `0x01BDD650`, PS2Ident `0x01C90F00`, uLaunchELF `0x01CB8190`).
+  If you build your own, either link above the resident or pack it.
 
 Payloads are zero-padded to a 16-byte boundary. This matters: the loader rounds the file
 size up to a block and decrypts that far, but only reads the real length off the card, so a
 short final block would decrypt uninitialised heap.
+
+### Footgun: nothing consumes `update.PGL`
+
+The loader does not delete the file, mark it consumed, or version-check it. It reads,
+decrypts, loads and jumps — and that is all. So a payload that itself re-enters the update
+path boots forever: load, exec, repeat, with no way out but removing the memory card.
+
+Packing the *patched* resident from `patch_resident.py` does exactly this, since it starts
+on the Update screen and reads from `mc0:`. Packing the *unpatched* resident is harmless and
+simply boots GameLock normally — it starts on the main screen and looks for USB.
 
 `argv[0]` is passed to your payload as the literal string `"update.PGL"`, not a full path.
 Programs that derive config paths from `argv[0]` (uLaunchELF does) will look in odd places.
@@ -116,3 +130,24 @@ own cipher routine, driven under emulation.
 ## License
 
 MIT.
+
+## Tested payloads
+
+All packed with this tool and booted by GameLock's own loader under PCSX2 2.6.3.
+
+| payload | load addr | verdict | result |
+|---|---|---|---|
+| uLaunchELF `BOOT-DS34-NO_NETWORK` | `0x01CB8190` | loadable | boots |
+| Open PS2 Loader v1.1.0 | `0x01BDD650` | loadable | boots |
+| PS2Ident | `0x01C90F00` | loadable | not booted yet |
+| uLaunchELF `BOOT-EXFAT-DS34-MMCE` | `0x01CA33D0` | loadable | not booted yet |
+| GameLock's own unpacked resident | `0x00100000` | warning | boots (see below) |
+
+The last row is the interesting one. It overlaps the resident across its whole range and
+still works: the copy replaced live code mid-run — including the patched enumeration stub at
+`0x100C50` — reached `ExecPS2`, and re-executed. Confirmed from the log rather than by eye,
+since GameLock's entire startup (`FCD USB-OHCI`, `Config.PGL`, `G.PGL`, `NTSC version`)
+appears once before the soft reboot and once after, while `mc0:/update.PGL` is opened twice
+before and **zero** times after — the payload is the unpatched build, which looks for USB.
+
+That is why the critical window is `0x119000`–`0x124000` and not the whole resident.

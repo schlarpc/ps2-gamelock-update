@@ -34,12 +34,22 @@ MAX_PAYLOAD = 0x500000
 BLOCK = 16
 
 # --- resident memory map (unpacked BOOT.ELF, loaded at 0x100000) ----------------------
-# The loader copies PT_LOAD segments while it is itself executing, so a payload that
-# overlaps the resident's own code destroys the copy loop mid-flight.
 RESIDENT_BASE = 0x100000
 RESIDENT_IMAGE_END = 0x15EA0C  # code + data of the unpacked resident
 RESIDENT_BSS_END = 0x272AE8  # cleared by the resident's own startup
 LOADER_ADDR = 0x1193F8  # FUN_001193f8, the ELF loader itself
+
+# The loader copies PT_LOAD segments while executing, so anything it still needs after the
+# copy must survive it: the loader, the memcpy/memset helpers, the IOP teardown calls,
+# FlushCache (0x121EB0) and _ExecPS2 (0x121E00). Overlapping *this* window is fatal.
+#
+# Overlapping the rest of the resident is not. Demonstrated: loading GameLock's own
+# unpacked resident (a full 0x100000-0x35EA0C segment) over the running patched copy
+# replaced live code mid-run — including the patched device-enumeration stub at
+# 0x100C50 — and still reached ExecPS2 and booted the payload. Only a narrow window
+# genuinely matters.
+CRITICAL_START = 0x119000
+CRITICAL_END = 0x124000
 
 PT_LOAD = 1
 
@@ -178,22 +188,19 @@ def check_payload(data: bytes) -> list[tuple[str, str]]:
         ))
 
     for s in loads:
-        if _overlaps(s.vaddr, s.end, RESIDENT_BASE, RESIDENT_IMAGE_END):
-            note = " (this region contains the loader itself)" if _overlaps(
-                s.vaddr, s.end, LOADER_ADDR, LOADER_ADDR + 0x400
-            ) else ""
+        if _overlaps(s.vaddr, s.end, CRITICAL_START, CRITICAL_END):
             out.append((
                 "error",
-                f"segment [{s.vaddr:#x},{s.end:#x}) overlaps the resident image "
-                f"[{RESIDENT_BASE:#x},{RESIDENT_IMAGE_END:#x}){note}; the copy would "
-                "overwrite the code performing it",
+                f"segment [{s.vaddr:#x},{s.end:#x}) overlaps [{CRITICAL_START:#x},"
+                f"{CRITICAL_END:#x}), which holds the loader, its memcpy/memset helpers "
+                "and ExecPS2; overwriting those mid-copy is fatal",
             ))
-        elif _overlaps(s.vaddr, s.end, RESIDENT_IMAGE_END, RESIDENT_BSS_END):
+        elif _overlaps(s.vaddr, s.end, RESIDENT_BASE, RESIDENT_BSS_END):
             out.append((
                 "warning",
-                f"segment [{s.vaddr:#x},{s.end:#x}) overlaps the resident's bss "
-                f"[{RESIDENT_IMAGE_END:#x},{RESIDENT_BSS_END:#x}); usually survivable "
-                "until ExecPS2, but not guaranteed",
+                f"segment [{s.vaddr:#x},{s.end:#x}) overlaps the resident "
+                f"[{RESIDENT_BASE:#x},{RESIDENT_BSS_END:#x}) outside the critical window; "
+                "observed to work, but you are overwriting a running program",
             ))
     return out
 

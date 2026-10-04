@@ -78,19 +78,21 @@ def test_rejects_entry_outside_load():
     assert any("entry point" in m for m in problems)
 
 
-def test_rejects_overlap_with_resident():
-    problems = errors(make_elf(entry=0x119000, vaddr=0x119000))
-    assert any("resident image" in m for m in problems)
-
-
-def test_calls_out_overlap_with_the_loader_itself():
+def test_rejects_overlap_with_the_critical_window():
     problems = errors(make_elf(entry=g.LOADER_ADDR, vaddr=g.LOADER_ADDR))
-    assert any("loader itself" in m for m in problems)
+    assert any("fatal" in m for m in problems)
+
+
+def test_resident_overlap_outside_critical_window_is_only_a_warning():
+    # Demonstrated on hardware-equivalent emulation: loading GameLock's own resident over
+    # itself replaced live code (including the stub at 0x100C50) and still booted.
+    low = make_elf(entry=0x100100, vaddr=0x100000, body=b"\x00" * 0x1000)
+    assert errors(low) == []
+    assert any(lvl == "warning" for lvl, _ in g.check_payload(low))
 
 
 def test_warns_on_bss_overlap():
-    levels = dict((m, lvl) for lvl, m in g.check_payload(make_elf(entry=0x200000, vaddr=0x200000)))
-    assert any(lvl == "warning" for lvl in levels.values())
+    assert any(lvl == "warning" for lvl, _ in g.check_payload(make_elf(entry=0x200000, vaddr=0x200000)))
     assert not errors(make_elf(entry=0x200000, vaddr=0x200000))
 
 
