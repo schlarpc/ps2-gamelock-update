@@ -70,16 +70,6 @@ Payloads are zero-padded to a 16-byte boundary. This matters: the loader rounds 
 size up to a block and decrypts that far, but only reads the real length off the card, so a
 short final block would decrypt uninitialised heap.
 
-### Footgun: nothing consumes `update.PGL`
-
-The loader does not delete the file, mark it consumed, or version-check it. It reads,
-decrypts, loads and jumps — and that is all. So a payload that itself re-enters the update
-path boots forever: load, exec, repeat, with no way out but removing the memory card.
-
-Packing the *patched* resident from `patch_resident.py` does exactly this, since it starts
-on the Update screen and reads from `mc0:`. Packing the *unpatched* resident is harmless and
-simply boots GameLock normally — it starts on the main screen and looks for USB.
-
 `argv[0]` is passed to your payload as the literal string `"update.PGL"`, not a full path.
 Programs that derive config paths from `argv[0]` (uLaunchELF does) will look in odd places.
 
@@ -111,29 +101,11 @@ You also need a memory card image with a GameLock installation on it — at mini
 `BAEXEC-SYSTEM/Config.PGL`, whose MD5 field must match the password you packed with.
 [`mymcplus`](https://github.com/thestr4ng3r/mymcplus) builds one.
 
-## Verified
-
-End to end under PCSX2 2.6.3: uLaunchELF (305 KB) packed with this tool, placed on the
-memory card, booted by GameLock's own loader — module loads, pad init, `PS2KBD - USB
-Keyboard Library`. The AES implementation was confirmed byte-exact against the resident's
-own cipher routine, driven under emulation.
-
-## Notes
-
-- This is for a discontinued 2007 accessory on a console that left production in 2013. The
-  "parental control" it enforces is a game-rating lock whose config and enforcement binary
-  both live on a removable memory card.
-- The `osdmain.elf` system update GameLock installs *is* signed (a KELF, signed with
-  console-derived MagicGate key material). The `update.PGL` channel documented here is not.
-  They are different mechanisms; only the latter is an open door.
-
-## License
-
-MIT.
-
 ## Tested payloads
 
 All packed with this tool and booted by GameLock's own loader under PCSX2 2.6.3.
+The AES implementation was confirmed byte-exact against the resident's own cipher
+routine, driven under emulation.
 
 | payload | load addr | verdict | result |
 |---|---|---|---|
@@ -151,3 +123,16 @@ appears once before the soft reboot and once after, while `mc0:/update.PGL` is o
 before and **zero** times after — the payload is the unpatched build, which looks for USB.
 
 That is why the critical window is `0x119000`–`0x124000` and not the whole resident.
+
+## Notes
+
+- This is for a discontinued 2007 accessory on a console that left production in 2013. The
+  "parental control" it enforces is a game-rating lock whose config and enforcement binary
+  both live on a removable memory card.
+- The `osdmain.elf` system update GameLock installs *is* signed (a KELF, signed with
+  console-derived MagicGate key material). The `update.PGL` channel documented here is not.
+  They are different mechanisms; only the latter is an open door.
+
+## License
+
+MIT.
