@@ -1,0 +1,17 @@
+[project]
+name = "ps2-gamelock-update"
+version = "1.0.0"
+description = "Pack payloads for the unsigned ELF loader in Xploder Parental GameLock (PS2)"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+dependencies = ["cryptography>=3.0"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.scripts]
+gamelock-pgl = "gamelock_pgl:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
